@@ -62,6 +62,17 @@
     margin:16px 0;
   }
   .archive-banner.show{display:block;}
+  .conn-banner{
+    display:none;
+    background:#3a1f1f;
+    border:1px solid #6b2a2a;
+    color:#ff9a9a;
+    font-size:13px;
+    padding:10px 14px;
+    border-radius:8px;
+    margin:16px 0;
+  }
+  .conn-banner.show{display:block;}
   table{width:100%;border-collapse:collapse;margin-top:20px;}
   thead th{
     text-align:left;
@@ -99,7 +110,6 @@
   .status-dropdown{padding:6px;min-width:150px;}
   .status-dropdown .dropdown-item{padding:4px;cursor:pointer;}
   .status-dropdown .dropdown-item:hover{background:#383838;}
-
   .chipfield{display:flex;flex-wrap:wrap;gap:6px;min-height:26px;align-items:center;position:relative;}
   .chip{
     background:var(--chip-bg);border:1px solid var(--border);
@@ -144,7 +154,6 @@
     background:var(--chip-bg);border:1px solid var(--border);color:var(--text);
     border-radius:5px;padding:5px 10px;font-size:12.5px;cursor:pointer;white-space:nowrap;
   }
-
   .task-panel{display:none;background:#171717;}
   .task-panel.open{display:table-row;}
   .task-panel td{padding:0 12px 16px 44px;}
@@ -235,6 +244,7 @@
   </div>
 
   <div class="archive-banner" id="archiveBanner">Viewing an archived week. Edits here update that week's saved record, not the current week.</div>
+  <div class="conn-banner" id="connBanner">Couldn't connect to save your changes. Check your connection and try again — this entry may not have saved.</div>
 
   <table>
     <thead>
@@ -255,17 +265,74 @@
 </div>
 
 <script>
+// ---- Firebase project config ----
 const FIREBASE_DB_URL = "https://bar-prep-tracker-default-rtdb.firebaseio.com";
+const FIREBASE_API_KEY = "AIzaSyD2Ptwby247_B5ncMiUlONzWBfDA1dj6LA";
+const DATA_PATH = "data"; // Bar Prep's own path within the shared bar-prep-tracker project
+
+// ---- Silent anonymous authentication ----
+// Each visitor gets an invisible identity (no login screen) so the database
+// rules can require "auth != null" instead of being wide open to anyone.
+let authToken = null;
+let authRefreshToken = null;
+let authExpiresAt = 0;
+
+async function signInAnonymously(){
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${FIREBASE_API_KEY}`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({returnSecureToken:true})
+  });
+  if (!res.ok) throw new Error('Anonymous sign-in failed: ' + res.status);
+  const data = await res.json();
+  authToken = data.idToken;
+  authRefreshToken = data.refreshToken;
+  authExpiresAt = Date.now() + (parseInt(data.expiresIn,10) * 1000) - 60000; // refresh 1 min early
+}
+
+async function refreshAuthToken(){
+  try{
+    const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: `grant_type=refresh_token&refresh_token=${authRefreshToken}`
+    });
+    if (!res.ok) throw new Error('refresh failed');
+    const data = await res.json();
+    authToken = data.id_token;
+    authRefreshToken = data.refresh_token;
+    authExpiresAt = Date.now() + (parseInt(data.expires_in,10) * 1000) - 60000;
+  }catch(e){
+    // Refresh token no longer valid — get a brand new anonymous identity instead.
+    await signInAnonymously();
+  }
+}
+
+async function ensureAuth(){
+  if (!authToken){
+    await signInAnonymously();
+  } else if (Date.now() > authExpiresAt){
+    await refreshAuthToken();
+  }
+}
+
+function showConnBanner(show){
+  const el = document.getElementById('connBanner');
+  if (el) el.classList.toggle('show', show);
+}
+
 const storage = {
   async get(key){
-    const res = await fetch(`${FIREBASE_DB_URL}/data/${encodeURIComponent(key)}.json`);
+    await ensureAuth();
+    const res = await fetch(`${FIREBASE_DB_URL}/${DATA_PATH}/${encodeURIComponent(key)}.json?auth=${authToken}`);
     if (!res.ok) throw new Error('Firebase get failed: ' + res.status);
     const value = await res.json();
     if (value === null || value === undefined) return null;
     return { key, value, shared: true };
   },
   async set(key, value){
-    const res = await fetch(`${FIREBASE_DB_URL}/data/${encodeURIComponent(key)}.json`, {
+    await ensureAuth();
+    const res = await fetch(`${FIREBASE_DB_URL}/${DATA_PATH}/${encodeURIComponent(key)}.json?auth=${authToken}`, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(value)
@@ -274,12 +341,14 @@ const storage = {
     return { key, value, shared: true };
   },
   async delete(key){
-    const res = await fetch(`${FIREBASE_DB_URL}/data/${encodeURIComponent(key)}.json`, { method: 'DELETE' });
+    await ensureAuth();
+    const res = await fetch(`${FIREBASE_DB_URL}/${DATA_PATH}/${encodeURIComponent(key)}.json?auth=${authToken}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('Firebase delete failed: ' + res.status);
     return { key, deleted: true, shared: true };
   },
   async list(prefix){
-    const res = await fetch(`${FIREBASE_DB_URL}/data.json?shallow=true`);
+    await ensureAuth();
+    const res = await fetch(`${FIREBASE_DB_URL}/${DATA_PATH}.json?shallow=true&auth=${authToken}`);
     if (!res.ok) throw new Error('Firebase list failed: ' + res.status);
     const obj = await res.json();
     const allKeys = obj ? Object.keys(obj) : [];
@@ -292,15 +361,15 @@ const SHIFTS = ["Monday AM","Monday PM","Tuesday AM","Tuesday PM","Wednesday AM"
   "Thursday AM","Thursday PM","Friday AM","Friday PM","Saturday AM","Saturday PM","Sunday AM","Sunday PM"];
 
 const COLOR_PALETTE = [
-  {bg:"#454545", text:"#dcdcda"},   // gray
-  {bg:"#5a4633", text:"#e3c9a3"},   // brown
-  {bg:"#5c4420", text:"#f0c383"},   // orange
-  {bg:"#5c531f", text:"#e8dc8a"},   // olive/yellow
-  {bg:"#25502c", text:"#95e0ac"},   // green
-  {bg:"#1f4566", text:"#93c1f5"},   // blue
-  {bg:"#4a2f66", text:"#cca8f0"},   // purple
-  {bg:"#63304a", text:"#f0a8c6"},   // pink
-  {bg:"#603030", text:"#f0a3a3"}    // red
+  {bg:"#454545", text:"#dcdcda"},
+  {bg:"#5a4633", text:"#e3c9a3"},
+  {bg:"#5c4420", text:"#f0c383"},
+  {bg:"#5c531f", text:"#e8dc8a"},
+  {bg:"#25502c", text:"#95e0ac"},
+  {bg:"#1f4566", text:"#93c1f5"},
+  {bg:"#4a2f66", text:"#cca8f0"},
+  {bg:"#63304a", text:"#f0a8c6"},
+  {bg:"#603030", text:"#f0a3a3"}
 ];
 function randomColor(usedList){
   const usedBgs = usedList.map(p => p.color && p.color.bg);
@@ -309,7 +378,6 @@ function randomColor(usedList){
   return pool[Math.floor(Math.random() * pool.length)];
 }
 function migrateRoster(raw){
-  // supports old format (array of plain name strings) and new format (array of {name,color})
   return raw.map(entry => {
     if (typeof entry === 'string') return {name: entry, color: randomColor([])};
     return entry;
@@ -331,18 +399,18 @@ function colorFor(field, name){
 
 async function loadRoster(){
   try{
-    const emp = await storage.get('roster:employees', true);
+    const emp = await storage.get('roster:employees');
     if (emp) EMPLOYEES = migrateRoster(JSON.parse(emp.value));
   }catch(e){}
   try{
-    const mgr = await storage.get('roster:managers', true);
+    const mgr = await storage.get('roster:managers');
     if (mgr) MANAGERS = migrateRoster(JSON.parse(mgr.value));
   }catch(e){}
 }
 async function saveRoster(field){
   const key = field === 'completedBy' ? 'roster:employees' : 'roster:managers';
   const list = field === 'completedBy' ? EMPLOYEES : MANAGERS;
-  try{ await storage.set(key, JSON.stringify(list), true); }catch(e){}
+  try{ await storage.set(key, JSON.stringify(list)); showConnBanner(false); }catch(e){ showConnBanner(true); }
 }
 function renameAcrossCurrentWeek(field, oldName, newName){
   SHIFTS.forEach(shift => {
@@ -365,18 +433,18 @@ const STATUS_META = {
   completed: {label:"Completed", cls:"green"}
 };
 
-let currentData = null;   // the week object currently rendered
-let currentKey = null;    // storage key of the week being viewed
+let currentData = null;
+let currentKey = null;
 let isReadOnly = false;
 let managerMode = false;
 let openTaskRow = null;
-let openDropdown = null; // {row, field}
-let openStatusDropdown = null; // shift name, or null
-let openNotesFor = null;   // shift name whose Notes dropdown is open, or null
-let editingRowNote = null; // {shift, noteIdx}
-let editingTask = null;  // {shift, groupIdx, itemIdx}
-let editingNote = null;  // {shift, groupIdx, itemIdx, noteIdx}
-let addingNoteFor = null; // {shift, groupIdx, itemIdx}
+let openDropdown = null;
+let openStatusDropdown = null;
+let openNotesFor = null;
+let editingRowNote = null;
+let editingTask = null;
+let editingNote = null;
+let addingNoteFor = null;
 
 function getWeekStart(now){
   const d = new Date(now);
@@ -507,9 +575,9 @@ function migrateTasks(raw, shift){
       if (!g.notes) g.notes = [];
       g.items.forEach(it => { if (!it.notes) it.notes = []; });
     });
-    return raw; // already grouped format
+    return raw;
   }
-  return [{header:null, done:false, notes:[], items: raw.map(it => ({...it, notes: it.notes || []}))}]; // old flat format
+  return [{header:null, done:false, notes:[], items: raw.map(it => ({...it, notes: it.notes || []}))}];
 }
 
 function blankWeek(){
@@ -521,22 +589,28 @@ function blankWeek(){
 async function loadWeek(dateKeyDate){
   const key = keyFor(dateKeyDate);
   try{
-    const res = await storage.get(key, true);
+    const res = await storage.get(key);
     const data = res ? JSON.parse(res.value) : blankWeek();
     SHIFTS.forEach(s => {
       data[s].tasks = migrateTasks(data[s].tasks, s);
       if (!data[s].rowNotes) data[s].rowNotes = [];
     });
+    showConnBanner(false);
     return data;
   }catch(e){
+    showConnBanner(true);
     return blankWeek();
   }
 }
 async function saveCurrentWeek(){
   if (isReadOnly) return;
   try{
-    await storage.set(currentKey, JSON.stringify(currentData), true);
-  }catch(e){ console.error("Save failed", e); }
+    await storage.set(currentKey, JSON.stringify(currentData));
+    showConnBanner(false);
+  }catch(e){
+    console.error("Save failed", e);
+    showConnBanner(true);
+  }
 }
 
 async function populateWeekPicker(){
@@ -547,7 +621,7 @@ async function populateWeekPicker(){
 
   let archivedKeys = [];
   try{
-    const res = await storage.list('week:', true);
+    const res = await storage.list('week:');
     if (res && res.keys) archivedKeys = res.keys;
   }catch(e){}
 
@@ -865,7 +939,6 @@ function renderTaskRow(list, shift, groupIdx, itemIdx, t, isHeaderTask, indent){
   }
   list.appendChild(item);
 
-  // Notes render on their own line, flush-left with the task's TEXT (not its checkbox)
   (t.notes || []).forEach((note, noteIdx) => {
     const isEditingNote = editingNote && editingNote.shift===shift && editingNote.groupIdx===groupIdx && editingNote.itemIdx===itemIdx && editingNote.noteIdx===noteIdx;
     const noteRow = document.createElement('div');
@@ -944,7 +1017,6 @@ function render(){
 
     const tr = document.createElement('tr');
 
-    // Name cell
     const tdName = document.createElement('td');
     const nameWrap = document.createElement('div');
     nameWrap.className = 'task-row-name';
@@ -953,21 +1025,17 @@ function render(){
     tdName.appendChild(nameWrap);
     tr.appendChild(tdName);
 
-    // Status cell
     const tdStatus = document.createElement('td');
     tdStatus.appendChild(buildStatusCell(shift, row, meta));
     tr.appendChild(tdStatus);
 
-    // Completed by / Checked by
     tr.appendChild(buildChipCell(shift, 'completedBy', EMPLOYEES));
     tr.appendChild(buildChipCell(shift, 'checkedBy', MANAGERS));
 
-    // Notes
     tr.appendChild(buildNotesCell(shift));
 
     tbody.appendChild(tr);
 
-    // Task sub-panel
     const panelTr = document.createElement('tr');
     panelTr.className = `task-panel ${openTaskRow===shift ? 'open':''}`;
     const panelTd = document.createElement('td');
@@ -1179,6 +1247,12 @@ document.getElementById('managerToggle').addEventListener('click', (e) => {
 });
 
 (async function init(){
+  try{
+    await ensureAuth();
+    showConnBanner(false);
+  }catch(e){
+    showConnBanner(true);
+  }
   await loadRoster();
   await populateWeekPicker();
   const thisMonday = getWeekStart(new Date());
